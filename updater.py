@@ -60,13 +60,24 @@ def download_and_install(asset):
     ps_exe=current_exe.replace("'","''")
     script=f"""$ErrorActionPreference = 'SilentlyContinue'
 $installer = '{ps_target}'
-$app = '{ps_exe}'
-$args = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS','/RESTARTAPPLICATIONS')
+$currentApp = '{ps_exe}'
+$args = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS')
 $p = Start-Process -FilePath $installer -ArgumentList $args -PassThru -Wait
-Start-Sleep -Milliseconds 1200
+Start-Sleep -Milliseconds 1500
+
+$candidates = @(
+    $currentApp,
+    (Join-Path $env:LOCALAPPDATA 'Programs\\PorcentajeBateria\\PorcentajeBateria.exe'),
+    (Join-Path $env:ProgramFiles 'PorcentajeBateria\\PorcentajeBateria.exe'),
+    (Join-Path $env:ProgramFiles(x86) 'PorcentajeBateria\\PorcentajeBateria.exe')
+) | Where-Object {{ $_ -and (Test-Path -LiteralPath $_) }} | Select-Object -Unique
+
 if (-not (Get-Process -Name 'PorcentajeBateria' -ErrorAction SilentlyContinue)) {{
-    if (Test-Path -LiteralPath $app) {{
-        Start-Process -FilePath $app
+    foreach ($app in $candidates) {{
+        try {{
+            Start-Process -FilePath $app
+            break
+        }} catch {{}}
     }}
 }}
 Start-Sleep -Milliseconds 300
