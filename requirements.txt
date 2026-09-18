@@ -1,0 +1,3 @@
+PySide6==6.8.2.1
+hidapi==0.14.0.post4
+packaging==24.2
