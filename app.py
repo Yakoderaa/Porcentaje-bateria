@@ -6,7 +6,7 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFrame, QProgressBar, QSystemTrayIcon, QMenu, QMessageBox,
-    QCheckBox, QFileDialog, QDialog, QTabWidget, QScrollArea
+    QCheckBox, QFileDialog, QDialog, QTabWidget, QScrollArea, QInputDialog
 )
 
 from battery import BatteryManager
@@ -14,6 +14,7 @@ from updater import check_update, download_and_install
 from version import APP_VERSION
 
 APP_NAME="Porcentaje de batería"
+APP_USER_MODEL_ID="Yakoderaa.PorcentajeBateria"
 RUN_KEY=r"Software\Microsoft\Windows\CurrentVersion\Run"
 CONFIG_DIR=os.path.join(os.getenv("LOCALAPPDATA") or os.path.expanduser("~"),"PorcentajeBateria")
 CONFIG_PATH=os.path.join(CONFIG_DIR,"config.json")
@@ -52,19 +53,26 @@ def app_icon():
 def tray_icon():
     return _load_icon(os.path.join("assets","tray.ico"),os.path.join("assets","tray.svg"))
 
-def _load_selection():
+def _load_config():
     try:
         with open(CONFIG_PATH,"r",encoding="utf-8") as f:
             data=json.load(f)
-        return set(data.get("selected_keys",[])),True
+        aliases=data.get("aliases",{})
+        if not isinstance(aliases,dict):
+            aliases={}
+        return set(data.get("selected_keys",[])),dict(aliases),True
     except Exception:
-        return set(),False
+        return set(),{},False
 
-def _save_selection(keys):
+def _save_config(keys,aliases):
     os.makedirs(CONFIG_DIR,exist_ok=True)
     tmp=CONFIG_PATH+".tmp"
+    payload={
+        "selected_keys":sorted(keys),
+        "aliases":dict(sorted(aliases.items())),
+    }
     with open(tmp,"w",encoding="utf-8") as f:
-        json.dump({"selected_keys":sorted(keys)},f,ensure_ascii=False,indent=2)
+        json.dump(payload,f,ensure_ascii=False,indent=2)
     os.replace(tmp,CONFIG_PATH)
 
 def startup_enabled():
@@ -117,14 +125,15 @@ def restart_as_admin():
         raise RuntimeError("Windows no pudo iniciar la aplicación como administrador.")
 
 class DeviceCard(QFrame):
-    def __init__(self,d,selectable=False,checked=False,on_toggle=None):
+    def __init__(self,d,display_name=None,selectable=False,checked=False,on_toggle=None,on_rename=None):
         super().__init__()
         self.setObjectName("card")
         lay=QVBoxLayout(self)
         lay.setSpacing(7)
 
         top=QHBoxLayout()
-        name=QLabel(d.name)
+        shown_name=display_name or d.name
+        name=QLabel(shown_name)
         name.setObjectName("deviceName")
         top.addWidget(name)
         top.addStretch()
@@ -155,12 +164,24 @@ class DeviceCard(QFrame):
             detail.setObjectName("detail")
             lay.addWidget(detail)
 
+        if shown_name!=d.name:
+            original=QLabel(f"Nombre original: {d.name}")
+            original.setObjectName("detail")
+            lay.addWidget(original)
+
+        options=QHBoxLayout()
         if selectable:
             cb=QCheckBox("Mostrar en Mis dispositivos y en la bandeja del sistema")
             cb.setChecked(checked)
             if on_toggle:
                 cb.toggled.connect(lambda state,key=d.key:on_toggle(key,state))
-            lay.addWidget(cb)
+            options.addWidget(cb)
+        options.addStretch()
+        if on_rename:
+            rename=QPushButton("Cambiar nombre")
+            rename.clicked.connect(lambda _=False,key=d.key:on_rename(key))
+            options.addWidget(rename)
+        lay.addLayout(options)
 
 class SettingsDialog(QDialog):
     def __init__(self,window):
@@ -337,8 +358,9 @@ class Window(QMainWindow):
         self.manager=BatteryManager()
         self.pool=QThreadPool.globalInstance()
         self._refresh_job=None
+        self._refresh_busy=False
         self.devices={}
-        self.selected_keys,self._selection_loaded=_load_selection()
+        self.selected_keys,self.aliases,self._selection_loaded=_load_config()
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
@@ -413,9 +435,14 @@ QScrollArea{border:0;background:transparent}""")
         self.tray.show()
         self.rebuild_tray_menu()
 
-        self.timer=QTimer(self)
-        self.timer.timeout.connect(self.refresh)
-        self.timer.start(30000)
+        self.fast_timer=QTimer(self)
+        self.fast_timer.timeout.connect(self.refresh_fast)
+        self.fast_timer.start(4000)
+
+        self.full_timer=QTimer(self)
+        self.full_timer.timeout.connect(self.refresh_background)
+        self.full_timer.start(15000)
+
         self.refresh()
 
     def _make_scroll_tab(self):
@@ -456,19 +483,40 @@ QScrollArea{border:0;background:transparent}""")
             1800,
         )
 
-    def refresh(self):
-        if not self.refresh_btn.isEnabled():
+    def _start_refresh(self,fn,interactive=False):
+        if self._refresh_busy:
             return
-        self.refresh_btn.setEnabled(False)
-        self.refresh_btn.setText("Actualizando dispositivos…")
-        self.status.setText("Consultando periféricos…")
-        j=Job(self.manager.refresh)
+        self._refresh_busy=True
+        if interactive:
+            self.refresh_btn.setEnabled(False)
+            self.refresh_btn.setText("Actualizando dispositivos…")
+            self.status.setText("Consultando periféricos…")
+        j=Job(fn)
         self._refresh_job=j
-        j.s.done.connect(self.render)
-        j.s.error.connect(lambda e:self.status.setText("Error al actualizar dispositivos: "+e))
-        j.s.done.connect(lambda _:self._reset_refresh())
-        j.s.error.connect(lambda _:self._reset_refresh())
+        j.s.done.connect(lambda devices,flag=interactive:self._refresh_done(devices,flag))
+        j.s.error.connect(lambda error,flag=interactive:self._refresh_error(error,flag))
         self.pool.start(j)
+
+    def refresh(self):
+        self._start_refresh(self.manager.refresh,True)
+
+    def refresh_background(self):
+        self._start_refresh(self.manager.refresh,False)
+
+    def refresh_fast(self):
+        self._start_refresh(self.manager.refresh_fast,False)
+
+    def _refresh_done(self,devices,interactive):
+        self._refresh_busy=False
+        self.render(devices)
+        if interactive:
+            self._reset_refresh()
+
+    def _refresh_error(self,error,interactive):
+        self._refresh_busy=False
+        if interactive:
+            self.status.setText("Error al actualizar dispositivos: "+error)
+            self._reset_refresh()
 
     def _reset_refresh(self):
         self.refresh_btn.setEnabled(True)
@@ -478,7 +526,7 @@ QScrollArea{border:0;background:transparent}""")
         self.devices={d.key:d for d in devices}
         if not self._selection_loaded and devices:
             self.selected_keys={d.key for d in devices}
-            _save_selection(self.selected_keys)
+            _save_config(self.selected_keys,self.aliases)
             self._selection_loaded=True
         self._render_all()
         self._render_selected()
@@ -490,13 +538,40 @@ QScrollArea{border:0;background:transparent}""")
             "No encontré periféricos compatibles o visibles."
         )
 
+    def display_name(self,d):
+        alias=(self.aliases.get(d.key) or "").strip()
+        return alias or d.name
+
+    def rename_device(self,key):
+        d=self.devices.get(key)
+        if not d:
+            return
+        current=self.display_name(d)
+        text,ok=QInputDialog.getText(
+            self,
+            "Cambiar nombre",
+            f"Nombre para {d.name}:\n(Dejalo vacío para restaurar el nombre original)",
+            text=current,
+        )
+        if not ok:
+            return
+        value=text.strip()
+        if not value or value==d.name:
+            self.aliases.pop(key,None)
+        else:
+            self.aliases[key]=value
+        _save_config(self.selected_keys,self.aliases)
+        self._render_selected()
+        self._render_all()
+        self.rebuild_tray_menu()
+
     def _render_selected(self):
         self._clear_layout(self.selected_layout)
         chosen=[
             d for d in self.devices.values()
             if d.key in self.selected_keys
         ]
-        chosen.sort(key=lambda d:(d.percent is None,d.name.lower()))
+        chosen.sort(key=lambda d:(d.percent is None,self.display_name(d).lower()))
         if not chosen:
             hint=QLabel(
                 "No seleccionaste ningún dispositivo. Abrí “Todos los dispositivos” y marcá los que querés ver acá y en la bandeja."
@@ -506,11 +581,15 @@ QScrollArea{border:0;background:transparent}""")
             self.selected_layout.addWidget(hint)
             return
         for d in chosen:
-            self.selected_layout.addWidget(DeviceCard(d))
+            self.selected_layout.addWidget(DeviceCard(
+                d,
+                display_name=self.display_name(d),
+                on_rename=self.rename_device,
+            ))
 
     def _render_all(self):
         self._clear_layout(self.all_layout)
-        devices=sorted(self.devices.values(),key=lambda d:(d.connection!="Bluetooth",d.name.lower()))
+        devices=sorted(self.devices.values(),key=lambda d:(d.connection!="Bluetooth",self.display_name(d).lower()))
         if not devices:
             hint=QLabel("No hay dispositivos detectados.")
             hint.setObjectName("muted")
@@ -520,9 +599,11 @@ QScrollArea{border:0;background:transparent}""")
             self.all_layout.addWidget(
                 DeviceCard(
                     d,
+                    display_name=self.display_name(d),
                     selectable=True,
                     checked=d.key in self.selected_keys,
                     on_toggle=self.set_device_selected,
+                    on_rename=self.rename_device,
                 )
             )
 
@@ -531,7 +612,7 @@ QScrollArea{border:0;background:transparent}""")
             self.selected_keys.add(key)
         else:
             self.selected_keys.discard(key)
-        _save_selection(self.selected_keys)
+        _save_config(self.selected_keys,self.aliases)
         self._selection_loaded=True
         self._render_selected()
         self.rebuild_tray_menu()
@@ -546,7 +627,7 @@ QScrollArea{border:0;background:transparent}""")
             d for d in self.devices.values()
             if d.key in self.selected_keys
         ]
-        selected.sort(key=lambda d:d.name.lower())
+        selected.sort(key=lambda d:self.display_name(d).lower())
         if selected:
             menu.addSeparator()
             header=QAction("Mis dispositivos",self)
@@ -556,10 +637,11 @@ QScrollArea{border:0;background:transparent}""")
             for d in selected:
                 level="—" if d.percent is None else f"{d.percent}%"
                 charge=f" · {d.status}" if d.status else ""
-                action=QAction(f"{d.name}  ·  {level}{charge}",self)
+                shown=self.display_name(d)
+                action=QAction(f"{shown}  ·  {level}{charge}",self)
                 action.triggered.connect(self.show_normal)
                 menu.addAction(action)
-                tooltip.append(f"{d.name}: {level}")
+                tooltip.append(f"{shown}: {level}")
             self.tray.setToolTip(" | ".join(tooltip)[:125])
         else:
             self.tray.setToolTip(APP_NAME)
