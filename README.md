@@ -8,10 +8,10 @@ Aplicación de Windows en Python para ver el nivel de batería y el estado de ca
 
 ## Soporte actual
 
-- **Razer DeathAdder V2 Pro (dongle 2.4 GHz)**: porcentaje y consulta de estado de carga por HID (`1532:007D`).
+- **Razer DeathAdder V2 Pro**: porcentaje inalámbrico (`1532:007D`), carga por HID `0x84`/byte 11 y detección directa del modo cableado `1532:007C`.
 - **Logitech G935 Gaming Headset**: porcentaje por el receptor `046D:0A87`; estado **Cargando** también detectado mediante la interfaz USB de carga `046D:0A88`.
 - **Redragon Fizz Pro K616 por Bluetooth**: Windows puede exponerlo como `BT5.0 KB`; la app lo identifica como Redragon y muestra el porcentaje BLE publicado por Windows.
-- **Redragon Fizz Pro K616 por dongle 2.4 GHz**: receptor `25A7:FA70` detectado; el dongle no expone un porcentaje conocido.
+- **Redragon Fizz Pro K616 por dongle 2.4 GHz**: receptor `25A7:FA70`; el dongle no expone porcentaje, pero el cable USB se detecta como `258A:0049` para indicar carga.
 - **JBL GO Essential**: se detecta como Bluetooth, pero Windows no expone porcentaje de batería para este modelo.
 - **Bluetooth genérico**: usa la propiedad de batería publicada por Windows cuando el dispositivo la expone.
 
@@ -19,7 +19,9 @@ Aplicación de Windows en Python para ver el nivel de batería y el estado de ca
 
 - Pestañas **Mis dispositivos** y **Todos los dispositivos**.
 - Selección persistente de los dispositivos que querés ver en la pantalla principal y en la bandeja.
+- Nombres personalizados persistentes por dispositivo.
 - Bandeja del sistema con porcentaje y estado de los dispositivos seleccionados.
+- Refresco rápido de estados HID/carga cada 4 segundos y redescubrimiento Bluetooth cada 15 segundos.
 - Inicio con Windows, minimizado en bandeja.
 - Actualizador automático con timeout y recuperación si GitHub no responde.
 - Exportación de diagnóstico HID/Bluetooth.

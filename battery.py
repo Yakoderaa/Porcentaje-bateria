@@ -1,6 +1,6 @@
 from __future__ import annotations
 import json, re, subprocess, time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 try:
@@ -23,6 +23,25 @@ def _clamp(v):
         return max(0, min(100, int(round(v))))
     except Exception:
         return None
+
+def _hid_live(vid, pid):
+    if hid is None:
+        return False
+    for info in hid.enumerate(vid,pid):
+        dev=None
+        try:
+            dev=hid.device()
+            dev.open_path(info["path"])
+            return True
+        except Exception:
+            continue
+        finally:
+            try:
+                if dev:
+                    dev.close()
+            except Exception:
+                pass
+    return False
 
 def _slug(text):
     return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
@@ -153,6 +172,7 @@ $items | ConvertTo-Json -Compress -Depth 4
                 entry["ids"].append(str(x.get("id") or ""))
 
         redragon_receiver=bool(hid and hid.enumerate(0x25A7,0xFA70))
+        redragon_wired=_hid_live(0x258A,0x0049)
         devices=[]
         for entry in grouped.values():
             raw_name=entry["name"]
@@ -161,8 +181,14 @@ $items | ConvertTo-Json -Compress -Depth 4
             name="Redragon Fizz Pro K616 (Bluetooth)" if is_redragon_ble else raw_name
             dtype="Teclado Bluetooth" if is_redragon_ble else _bluetooth_type(name,entry["class"])
             detail=dtype
+            status="Conectado"
             if is_redragon_ble:
                 detail+=" · Windows lo anuncia como BT5.0 KB y publica su batería mediante Bluetooth LE."
+                if redragon_wired:
+                    status="Cargando"
+                    detail+=" · Cable USB del K616 detectado (258A:0049)."
+            elif name.lower()=="jbl go essential":
+                detail+=" · El JBL GO Essential no expone a Windows un perfil/propiedad de batería utilizable; no hay porcentaje fiable disponible."
             elif pct is not None:
                 detail+=" · Porcentaje publicado por Windows."
             else:
@@ -173,7 +199,7 @@ $items | ConvertTo-Json -Compress -Depth 4
                 name,
                 pct,
                 "Bluetooth",
-                "Conectado",
+                status,
                 detail,
                 dtype,
             ))
@@ -182,6 +208,7 @@ $items | ConvertTo-Json -Compress -Depth 4
 class RazerDeathAdderV2ProProvider:
     VID=0x1532
     PID=0x007D
+    WIRED_PID=0x007C
 
     def _command(self, command_id):
         report=bytearray(90)
@@ -215,6 +242,7 @@ class RazerDeathAdderV2ProProvider:
     def read(self):
         if hid is None:
             return []
+        wired_present=_hid_live(self.VID,self.WIRED_PID)
         candidates=[
             d for d in hid.enumerate(self.VID,self.PID)
             if d.get("interface_number") in (0,-1)
@@ -234,14 +262,21 @@ class RazerDeathAdderV2ProProvider:
                     continue
                 pct=_clamp(battery[9]*100/255)
                 charging_data=self._query(dev,0x84)
-                charging=bool(charging_data and charging_data[9]!=0)
+                protocol_charging=bool(charging_data and len(charging_data)>11 and charging_data[11]!=0)
+                charging=wired_present or protocol_charging
+                charge_source=(
+                    "cable USB 1532:007C detectado"
+                    if wired_present else
+                    "comando HID 0x84 (byte 11)" if charging_data else
+                    "estado de carga no reportado por el receptor"
+                )
                 return [BatteryDevice(
                     "razer:deathadder-v2-pro",
                     "Razer DeathAdder V2 Pro",
                     pct,
                     "Dongle 2.4 GHz",
                     "Cargando" if charging else "Conectado",
-                    "Lectura HID nativa · estado de carga consultado al mouse.",
+                    f"Lectura HID nativa · {charge_source}.",
                     "Mouse inalámbrico",
                 )]
             except Exception:
@@ -252,6 +287,13 @@ class RazerDeathAdderV2ProProvider:
                         dev.close()
                 except Exception:
                     pass
+        if wired_present:
+            return [BatteryDevice(
+                "razer:deathadder-v2-pro","Razer DeathAdder V2 Pro",None,
+                "USB","Cargando",
+                "Mouse conectado por cable USB (1532:007C); el porcentaje inalámbrico no respondió.",
+                "Mouse inalámbrico",
+            )]
         if hid.enumerate(self.VID,self.PID):
             return [BatteryDevice(
                 "razer:deathadder-v2-pro","Razer DeathAdder V2 Pro",None,
@@ -284,7 +326,7 @@ class LogitechG935Provider:
         if hid is None:
             return []
         found=hid.enumerate(self.VID,self.PID)
-        charger_present=bool(hid.enumerate(self.VID,self.CHARGER_PID))
+        charger_present=_hid_live(self.VID,self.CHARGER_PID)
         preferred=[d for d in found if d.get("usage_page") in (0xFF43,0xFF00)]
         candidates=preferred+[d for d in found if d not in preferred]
         for info in candidates:
@@ -348,21 +390,34 @@ class LogitechG935Provider:
 class RedragonFizzProvider:
     VID=0x25A7
     PID=0xFA70
+    WIRED_VID=0x258A
+    WIRED_PID=0x0049
+
+    def wired_present(self):
+        return _hid_live(self.WIRED_VID,self.WIRED_PID)
 
     def read(self):
         if hid is None:
             return []
         found=hid.enumerate(self.VID,self.PID)
-        if found:
+        wired=self.wired_present()
+        if found or wired:
             vendor_pages=sorted({
                 d.get("usage_page") for d in found
                 if isinstance(d.get("usage_page"),int) and d.get("usage_page")>=0xFF00
             })
             pages=", ".join(f"0x{x:04X}" for x in vendor_pages) or "sin página propietaria"
+            if wired:
+                connection="USB + Dongle 2.4 GHz" if found else "USB"
+                status="Cargando"
+                detail="Cable USB del K616 detectado como 258A:0049. El teclado está conectado por cable y puede cargar; el porcentaje por dongle no está disponible."
+            else:
+                connection="Dongle 2.4 GHz"
+                status="Detectado"
+                detail=f"Receptor 25A7:FA70 detectado ({pages}). El dongle no expone un porcentaje de batería conocido."
             return [BatteryDevice(
                 "redragon:k616","Redragon Fizz Pro K616 (dongle)",None,
-                "Dongle 2.4 GHz","Detectado",
-                f"Receptor 25A7:FA70 detectado ({pages}). El protocolo propietario de batería/carga todavía no está identificado.",
+                connection,status,detail,
                 "Teclado inalámbrico",
             )]
         return []
@@ -370,13 +425,15 @@ class RedragonFizzProvider:
 class BatteryManager:
     def __init__(self):
         self.bluetooth=WindowsBluetoothProvider()
+        self.redragon=RedragonFizzProvider()
         self.native=[
             RazerDeathAdderV2ProProvider(),
             LogitechG935Provider(),
-            RedragonFizzProvider(),
+            self.redragon,
         ]
+        self._bluetooth_cache=[]
 
-    def refresh(self):
+    def _native_devices(self):
         merged={}
         for provider in self.native:
             try:
@@ -384,12 +441,47 @@ class BatteryManager:
                     merged[d.key]=d
             except Exception:
                 pass
+        return merged
+
+    def _cached_bluetooth_with_live_status(self):
+        wired=self.redragon.wired_present()
+        out=[]
+        for d in self._bluetooth_cache:
+            if d.key=="redragon:k616:bluetooth":
+                if wired:
+                    out.append(replace(
+                        d,
+                        status="Cargando",
+                        detail="Teclado Bluetooth · Windows publica su batería BLE · cable USB 258A:0049 detectado."
+                    ))
+                elif d.status=="Cargando":
+                    out.append(replace(
+                        d,
+                        status="Conectado",
+                        detail="Teclado Bluetooth · Windows publica su batería mediante Bluetooth LE."
+                    ))
+                else:
+                    out.append(d)
+            else:
+                out.append(d)
+        return out
+
+    def refresh_fast(self):
+        merged=self._native_devices()
+        for d in self._cached_bluetooth_with_live_status():
+            if d.key not in merged or (merged[d.key].percent is None and d.percent is not None):
+                merged[d.key]=d
+        return list(merged.values())
+
+    def refresh(self):
+        merged=self._native_devices()
         try:
-            for d in self.bluetooth.catalog():
-                if d.key not in merged or (merged[d.key].percent is None and d.percent is not None):
-                    merged[d.key]=d
+            self._bluetooth_cache=self.bluetooth.catalog()
         except Exception:
             pass
+        for d in self._cached_bluetooth_with_live_status():
+            if d.key not in merged or (merged[d.key].percent is None and d.percent is not None):
+                merged[d.key]=d
         return list(merged.values())
 
     def diagnostic(self):
@@ -399,7 +491,9 @@ class BatteryManager:
             "bluetooth_catalog":[],
             "redragon_fizz_receiver":[],
             "logitech_g935_charger":[],
-            "version":4,
+            "razer_wired":[],
+            "redragon_wired":[],
+            "version":5,
         }
         if hid:
             for d in hid.enumerate():
@@ -416,6 +510,10 @@ class BatteryManager:
                     result["redragon_fizz_receiver"].append(item)
                 if item.get("vendor_id")==0x046D and item.get("product_id")==0x0A88:
                     result["logitech_g935_charger"].append(item)
+                if item.get("vendor_id")==0x1532 and item.get("product_id")==0x007C:
+                    result["razer_wired"].append(item)
+                if item.get("vendor_id")==0x258A and item.get("product_id")==0x0049:
+                    result["redragon_wired"].append(item)
         result["bluetooth_devices"]=self.bluetooth.raw()
         result["bluetooth_catalog"]=[d.__dict__ for d in self.bluetooth.catalog()]
         return result
