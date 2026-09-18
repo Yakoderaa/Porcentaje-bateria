@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, os, subprocess, tempfile, urllib.request
+import json, os, subprocess, sys, tempfile, urllib.request
 from packaging.version import Version
 from version import APP_VERSION
 
@@ -52,9 +52,43 @@ def download_and_install(asset):
     except Exception as e:
         raise UpdateError(f"No se pudo descargar la actualización: {e}") from e
 
-    flags=getattr(subprocess,"CREATE_NEW_PROCESS_GROUP",0)|getattr(subprocess,"DETACHED_PROCESS",0)
+    # Use a tiny detached helper so the updater can exit, let Inno replace the
+    # running executable, then guarantee the installed app is launched again.
+    current_exe=sys.executable if getattr(sys,"frozen",False) else os.path.abspath(sys.argv[0])
+    helper=os.path.join(tempfile.gettempdir(),"PorcentajeBateria-update-helper.ps1")
+    ps_target=target.replace("'","''")
+    ps_exe=current_exe.replace("'","''")
+    script=f"""$ErrorActionPreference = 'SilentlyContinue'
+$installer = '{ps_target}'
+$currentApp = '{ps_exe}'
+$args = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS')
+$p = Start-Process -FilePath $installer -ArgumentList $args -PassThru -Wait
+Start-Sleep -Milliseconds 1500
+
+$candidates = @(
+    $currentApp,
+    (Join-Path $env:LOCALAPPDATA 'Programs\\PorcentajeBateria\\PorcentajeBateria.exe'),
+    (Join-Path $env:ProgramFiles 'PorcentajeBateria\\PorcentajeBateria.exe'),
+    (Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'PorcentajeBateria\\PorcentajeBateria.exe')
+) | Where-Object {{ $_ -and (Test-Path -LiteralPath $_) }} | Select-Object -Unique
+
+if (-not (Get-Process -Name 'PorcentajeBateria' -ErrorAction SilentlyContinue)) {{
+    foreach ($app in $candidates) {{
+        try {{
+            Start-Process -FilePath $app
+            break
+        }} catch {{}}
+    }}
+}}
+Start-Sleep -Milliseconds 300
+Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force
+"""
+    with open(helper,"w",encoding="utf-8-sig") as f:
+        f.write(script)
+
+    flags=getattr(subprocess,"CREATE_NEW_PROCESS_GROUP",0)|getattr(subprocess,"DETACHED_PROCESS",0)|getattr(subprocess,"CREATE_NO_WINDOW",0)
     subprocess.Popen(
-        [target,"/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/CLOSEAPPLICATIONS"],
+        ["powershell.exe","-NoProfile","-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",helper],
         close_fds=True,
         creationflags=flags,
     )
