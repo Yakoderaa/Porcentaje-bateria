@@ -17,8 +17,10 @@ jobs:
           python-version: '3.12'
       - name: Install Python dependencies
         run: pip install -r requirements.txt pyinstaller
+      - name: Build Windows icons
+        run: python build_icons.py
       - name: Build EXE
-        run: pyinstaller --noconfirm --clean --onefile --windowed --name PorcentajeBateria app.py
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name PorcentajeBateria --icon assets/app.ico --add-data "assets/app.ico;assets" --add-data "assets/tray.ico;assets" --add-data "assets/app.svg;assets" --add-data "assets/tray.svg;assets" app.py
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
       - name: Read version
