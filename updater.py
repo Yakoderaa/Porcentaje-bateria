@@ -69,7 +69,7 @@ $candidates = @(
     $currentApp,
     (Join-Path $env:LOCALAPPDATA 'Programs\\PorcentajeBateria\\PorcentajeBateria.exe'),
     (Join-Path $env:ProgramFiles 'PorcentajeBateria\\PorcentajeBateria.exe'),
-    (Join-Path $env:ProgramFiles(x86) 'PorcentajeBateria\\PorcentajeBateria.exe')
+    (Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'PorcentajeBateria\\PorcentajeBateria.exe')
 ) | Where-Object {{ $_ -and (Test-Path -LiteralPath $_) }} | Select-Object -Unique
 
 if (-not (Get-Process -Name 'PorcentajeBateria' -ErrorAction SilentlyContinue)) {{
