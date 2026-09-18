@@ -389,7 +389,7 @@ class LogitechG935Provider:
         if hid is None:
             return []
         found=hid.enumerate(self.VID,self.PID)
-        charger_present=_hid_live(self.VID,self.CHARGER_PID) or _pnp_present(self.VID,self.CHARGER_PID)
+        charger_present=_hid_live(self.VID,self.CHARGER_PID)
         preferred=[d for d in found if d.get("usage_page") in (0xFF43,0xFF00)]
         candidates=preferred+[d for d in found if d not in preferred]
         for info in candidates:
