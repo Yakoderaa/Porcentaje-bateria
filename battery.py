@@ -72,6 +72,11 @@ def _system_bt_name(name):
         "intel(r) wireless bluetooth",
         "mediatek bluetooth adapter",
         "realtek bluetooth adapter",
+        "servicio de informaci",
+        "servicio de atributo gen",
+        "perfil de acceso gen",
+        "bluetooth device (personal area network",
+        "dispositivo bluetooth de bajo consumo hid",
     )
     return any(x in n for x in noise)
 
@@ -147,20 +152,24 @@ $items | ConvertTo-Json -Compress -Depth 4
                     entry["class"]=pnp_class
                 entry["ids"].append(str(x.get("id") or ""))
 
+        redragon_receiver=bool(hid and hid.enumerate(0x25A7,0xFA70))
         devices=[]
         for entry in grouped.values():
-            name=entry["name"]
+            raw_name=entry["name"]
             pct=entry["battery"]
-            dtype=_bluetooth_type(name,entry["class"])
+            is_redragon_ble=raw_name.lower()=="bt5.0 kb" and redragon_receiver
+            name="Redragon Fizz Pro K616 (Bluetooth)" if is_redragon_ble else raw_name
+            dtype="Teclado Bluetooth" if is_redragon_ble else _bluetooth_type(name,entry["class"])
             detail=dtype
-            if name.lower()=="bt5.0 kb":
-                detail+=" · Nombre genérico anunciado por el propio dispositivo; probablemente es un teclado Bluetooth."
+            if is_redragon_ble:
+                detail+=" · Windows lo anuncia como BT5.0 KB y publica su batería mediante Bluetooth LE."
             elif pct is not None:
                 detail+=" · Porcentaje publicado por Windows."
             else:
                 detail+=" · Windows no publica porcentaje de batería para este dispositivo."
+            key="redragon:k616:bluetooth" if is_redragon_ble else "bluetooth:"+_slug(name)
             devices.append(BatteryDevice(
-                "bluetooth:"+_slug(name),
+                key,
                 name,
                 pct,
                 "Bluetooth",
@@ -265,6 +274,7 @@ def _interpolate_curve(voltage,curve):
 class LogitechG935Provider:
     VID=0x046D
     PID=0x0A87
+    CHARGER_PID=0x0A88
     CURVE=[
         (3150,0),(3300,5),(3500,10),(3650,20),
         (3750,40),(3850,60),(3950,80),(4100,100)
@@ -274,6 +284,7 @@ class LogitechG935Provider:
         if hid is None:
             return []
         found=hid.enumerate(self.VID,self.PID)
+        charger_present=bool(hid.enumerate(self.VID,self.CHARGER_PID))
         preferred=[d for d in found if d.get("usage_page") in (0xFF43,0xFF00)]
         candidates=preferred+[d for d in found if d not in preferred]
         for info in candidates:
@@ -299,16 +310,17 @@ class LogitechG935Provider:
                     if pct is None:
                         continue
                     charge_code=resp[6]
-                    if charge_code==0x03:
-                        status="Cargando"
-                    elif charge_code==0x07:
+                    if charge_code==0x07 or (charger_present and pct>=99):
                         status="Carga completa"
+                    elif charge_code==0x03 or charger_present:
+                        status="Cargando"
                     else:
                         status="Conectado"
+                    charge_source="cable USB 046D:0A88 detectado" if charger_present else f"estado HID 0x{charge_code:02X}"
                     return [BatteryDevice(
                         "logitech:g935","Logitech G935 Gaming Headset",pct,
                         "Dongle USB",status,
-                        f"Lectura HID nativa · {voltage} mV · estado de carga leído del auricular.",
+                        f"Lectura HID nativa · {voltage} mV · {charge_source}.",
                         "Auriculares inalámbricos",
                     )]
             except Exception:
@@ -319,11 +331,16 @@ class LogitechG935Provider:
                         dev.close()
                 except Exception:
                     pass
-        if found:
+        if found or charger_present:
+            status="Cargando" if charger_present else "Detectado"
+            detail=(
+                "Cable USB de carga 046D:0A88 detectado; el receptor no respondió con un porcentaje."
+                if charger_present else
+                "Receptor 046D:0A87 detectado, pero no respondió a la consulta de batería."
+            )
             return [BatteryDevice(
                 "logitech:g935","Logitech G935 Gaming Headset",None,
-                "Dongle USB","Detectado",
-                "Receptor 046D:0A87 detectado, pero no respondió a la consulta de batería.",
+                "Dongle USB",status,detail,
                 "Auriculares inalámbricos",
             )]
         return []
@@ -343,7 +360,7 @@ class RedragonFizzProvider:
             })
             pages=", ".join(f"0x{x:04X}" for x in vendor_pages) or "sin página propietaria"
             return [BatteryDevice(
-                "redragon:k616","Redragon Fizz Pro K616",None,
+                "redragon:k616","Redragon Fizz Pro K616 (dongle)",None,
                 "Dongle 2.4 GHz","Detectado",
                 f"Receptor 25A7:FA70 detectado ({pages}). El protocolo propietario de batería/carga todavía no está identificado.",
                 "Teclado inalámbrico",
@@ -381,7 +398,8 @@ class BatteryManager:
             "bluetooth_devices":[],
             "bluetooth_catalog":[],
             "redragon_fizz_receiver":[],
-            "version":3,
+            "logitech_g935_charger":[],
+            "version":4,
         }
         if hid:
             for d in hid.enumerate():
@@ -396,6 +414,8 @@ class BatteryManager:
                 result["hid"].append(item)
                 if item.get("vendor_id")==0x25A7 and item.get("product_id")==0xFA70:
                     result["redragon_fizz_receiver"].append(item)
+                if item.get("vendor_id")==0x046D and item.get("product_id")==0x0A88:
+                    result["logitech_g935_charger"].append(item)
         result["bluetooth_devices"]=self.bluetooth.raw()
         result["bluetooth_catalog"]=[d.__dict__ for d in self.bluetooth.catalog()]
         return result
