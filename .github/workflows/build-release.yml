@@ -1,0 +1,43 @@
+name: Build and Release Windows
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt pyinstaller
+      - name: Build EXE
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name PorcentajeBateria app.py
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Read version
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path version.py -Pattern 'APP_VERSION\s*=\s*"([^"]+)"').Matches.Groups[1].Value
+          "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build installer
+        shell: pwsh
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$env:APP_VERSION" installer.iss'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PorcentajeBateria-Windows
+          path: installer_out/PorcentajeBateria-Setup.exe
+      - name: Create release if version is new
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v$env:APP_VERSION"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag "installer_out/PorcentajeBateria-Setup.exe#PorcentajeBateria-Setup.exe" --title "Porcentaje de batería $tag" --notes "Versión $env:APP_VERSION para Windows."
+          }
