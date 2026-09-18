@@ -14,6 +14,7 @@ OutputBaseFilename=PorcentajeBateria-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=assets\\app.ico
 PrivilegesRequired=lowest
 CloseApplications=force
 RestartApplications=no

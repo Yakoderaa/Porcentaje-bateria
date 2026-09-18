@@ -33,21 +33,24 @@ class Job(QRunnable):
         except Exception as e:
             self.s.error.emit(str(e))
 
+def resource_path(relative):
+    base=getattr(sys,"_MEIPASS",os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base,relative)
+
+def _load_icon(primary,fallback_svg):
+    for rel in (primary,fallback_svg):
+        path=resource_path(rel)
+        if os.path.exists(path):
+            icon=QIcon(path)
+            if not icon.isNull():
+                return icon
+    return QIcon()
+
 def app_icon():
-    p=QPixmap(64,64)
-    p.fill(Qt.transparent)
-    q=QPainter(p)
-    q.setRenderHint(QPainter.Antialiasing)
-    q.setBrush(QColor("#30d158"))
-    q.setPen(Qt.NoPen)
-    q.drawRoundedRect(8,14,44,36,8,8)
-    q.drawRect(52,25,5,14)
-    q.setBrush(QColor("#0b1117"))
-    q.drawRoundedRect(13,19,34,26,5,5)
-    q.setBrush(QColor("#30d158"))
-    q.drawRoundedRect(17,23,23,18,4,4)
-    q.end()
-    return QIcon(p)
+    return _load_icon(os.path.join("assets","app.ico"),os.path.join("assets","app.svg"))
+
+def tray_icon():
+    return _load_icon(os.path.join("assets","tray.ico"),os.path.join("assets","tray.svg"))
 
 def _load_selection():
     try:
@@ -403,7 +406,7 @@ QTabBar::tab:selected{background:#1b2935;color:#edf4fa}
 QScrollArea{border:0;background:transparent}""")
 
         self.settings_dialog=SettingsDialog(self)
-        self.tray=QSystemTrayIcon(app_icon(),self)
+        self.tray=QSystemTrayIcon(tray_icon(),self)
         self.tray.activated.connect(
             lambda r:self.show_normal() if r==QSystemTrayIcon.Trigger else None
         )
@@ -592,9 +595,16 @@ QScrollArea{border:0;background:transparent}""")
             QMessageBox.critical(self,"Error",str(e))
 
 def main():
+    if os.name=="nt":
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+        except Exception:
+            pass
     app=QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
+    app.setWindowIcon(app_icon())
     w=Window()
     if "--minimized" not in sys.argv:
         w.show()
