@@ -1,6 +1,7 @@
 from __future__ import annotations
-import json, re, subprocess, time
+import json, re, statistics, subprocess, time
 from dataclasses import dataclass, replace
+from collections import deque
 from typing import Optional
 
 try:
@@ -42,6 +43,25 @@ def _hid_live(vid, pid):
             except Exception:
                 pass
     return False
+
+def _pnp_present(vid, pid):
+    if subprocess is None:
+        return False
+    needle=f"VID_{vid:04X}&PID_{pid:04X}"
+    script=(
+        "$x=Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | "
+        f"Where-Object {{$_.InstanceId -match '{needle}'}} | Select-Object -First 1; "
+        "if ($x) { '1' } else { '0' }"
+    )
+    try:
+        p=subprocess.run(
+            ["powershell.exe","-NoProfile","-ExecutionPolicy","Bypass","-Command",script],
+            capture_output=True,text=True,timeout=4,
+            creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0)
+        )
+        return p.returncode==0 and p.stdout.strip()=="1"
+    except Exception:
+        return False
 
 def _slug(text):
     return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
@@ -242,7 +262,7 @@ class RazerDeathAdderV2ProProvider:
     def read(self):
         if hid is None:
             return []
-        wired_present=_hid_live(self.VID,self.WIRED_PID)
+        wired_present=_hid_live(self.VID,self.WIRED_PID) or _pnp_present(self.VID,self.WIRED_PID)
         candidates=[
             d for d in hid.enumerate(self.VID,self.PID)
             if d.get("interface_number") in (0,-1)
@@ -322,11 +342,54 @@ class LogitechG935Provider:
         (3750,40),(3850,60),(3950,80),(4100,100)
     ]
 
+    def __init__(self):
+        self._voltages=deque(maxlen=5)
+        self._display_pct=None
+        self._last_update=None
+        self._last_charging=None
+
+    def _stable_percent(self, voltage, charging):
+        self._voltages.append(voltage)
+        stable_mv=int(statistics.median(self._voltages))
+        raw=_interpolate_curve(stable_mv,self.CURVE)
+        if raw is None:
+            return None,stable_mv
+
+        now=time.monotonic()
+        if self._display_pct is None or self._last_update is None:
+            self._display_pct=float(raw)
+            self._last_update=now
+            self._last_charging=charging
+            return _clamp(self._display_pct),stable_mv
+
+        dt=max(0.1,now-self._last_update)
+        # The G935 reports cell voltage, not a true percentage. Charging voltage rises
+        # immediately when USB is connected, so constrain display movement to a plausible rate.
+        if charging:
+            max_up=dt*(2.0/60.0)      # max ~2 percentage points/minute upward
+            max_down=dt*(0.5/60.0)
+        else:
+            max_up=dt*(0.5/60.0)
+            max_down=dt*(1.5/60.0)    # max ~1.5 points/minute downward
+
+        target=float(raw)
+        delta=target-self._display_pct
+        if delta>0:
+            delta=min(delta,max_up)
+        else:
+            delta=max(delta,-max_down)
+
+        # Smooth tiny voltage noise further while still obeying the physical rate limit.
+        self._display_pct+=delta
+        self._last_update=now
+        self._last_charging=charging
+        return _clamp(self._display_pct),stable_mv
+
     def read(self):
         if hid is None:
             return []
         found=hid.enumerate(self.VID,self.PID)
-        charger_present=_hid_live(self.VID,self.CHARGER_PID)
+        charger_present=_hid_live(self.VID,self.CHARGER_PID) or _pnp_present(self.VID,self.CHARGER_PID)
         preferred=[d for d in found if d.get("usage_page") in (0xFF43,0xFF00)]
         candidates=preferred+[d for d in found if d not in preferred]
         for info in candidates:
@@ -348,21 +411,31 @@ class LogitechG935Provider:
                     if resp[2]!=0x08 or resp[3]!=0x0A:
                         continue
                     voltage=(resp[4]<<8)|resp[5]
-                    pct=_interpolate_curve(voltage,self.CURVE)
+                    flags=resp[6]
+                    measurement_valid=bool(flags & 0x01)
+                    protocol_charging=bool(flags & 0x02)
+                    if not measurement_valid or voltage<2000:
+                        continue
+                    charging=protocol_charging or charger_present
+                    pct,stable_mv=self._stable_percent(voltage,charging)
                     if pct is None:
                         continue
-                    charge_code=resp[6]
-                    if charge_code==0x07 or (charger_present and pct>=99):
+                    if charging and pct>=99:
                         status="Carga completa"
-                    elif charge_code==0x03 or charger_present:
+                    elif charging:
                         status="Cargando"
                     else:
                         status="Conectado"
-                    charge_source="cable USB 046D:0A88 detectado" if charger_present else f"estado HID 0x{charge_code:02X}"
+                    sources=[]
+                    if protocol_charging:
+                        sources.append("flag HID++ de carga")
+                    if charger_present:
+                        sources.append("USB 046D:0A88")
+                    charge_source=" + ".join(sources) if sources else "sin carga"
                     return [BatteryDevice(
                         "logitech:g935","Logitech G935 Gaming Headset",pct,
                         "Dongle USB",status,
-                        f"Lectura HID nativa · {voltage} mV · {charge_source}.",
+                        f"Estimación estabilizada · {stable_mv} mV (muestra {voltage} mV) · {charge_source}.",
                         "Auriculares inalámbricos",
                     )]
             except Exception:
@@ -493,7 +566,7 @@ class BatteryManager:
             "logitech_g935_charger":[],
             "razer_wired":[],
             "redragon_wired":[],
-            "version":5,
+            "version":6,
         }
         if hid:
             for d in hid.enumerate():
