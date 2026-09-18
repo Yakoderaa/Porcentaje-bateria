@@ -17,7 +17,7 @@ WizardStyle=modern
 SetupIconFile=assets\\app.ico
 PrivilegesRequired=lowest
 CloseApplications=force
-RestartApplications=no
+RestartApplications=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
 [Files]
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
