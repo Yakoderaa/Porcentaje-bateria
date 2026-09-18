@@ -6,7 +6,7 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFrame, QProgressBar, QSystemTrayIcon, QMenu, QMessageBox,
-    QCheckBox, QFileDialog, QDialog
+    QCheckBox, QFileDialog, QDialog, QTabWidget, QScrollArea
 )
 
 from battery import BatteryManager
@@ -15,6 +15,8 @@ from version import APP_VERSION
 
 APP_NAME="Porcentaje de batería"
 RUN_KEY=r"Software\Microsoft\Windows\CurrentVersion\Run"
+CONFIG_DIR=os.path.join(os.getenv("LOCALAPPDATA") or os.path.expanduser("~"),"PorcentajeBateria")
+CONFIG_PATH=os.path.join(CONFIG_DIR,"config.json")
 
 class Signals(QObject):
     done=Signal(object)
@@ -46,6 +48,21 @@ def app_icon():
     q.drawRoundedRect(17,23,23,18,4,4)
     q.end()
     return QIcon(p)
+
+def _load_selection():
+    try:
+        with open(CONFIG_PATH,"r",encoding="utf-8") as f:
+            data=json.load(f)
+        return set(data.get("selected_keys",[])),True
+    except Exception:
+        return set(),False
+
+def _save_selection(keys):
+    os.makedirs(CONFIG_DIR,exist_ok=True)
+    tmp=CONFIG_PATH+".tmp"
+    with open(tmp,"w",encoding="utf-8") as f:
+        json.dump({"selected_keys":sorted(keys)},f,ensure_ascii=False,indent=2)
+    os.replace(tmp,CONFIG_PATH)
 
 def startup_enabled():
     if os.name!="nt":
@@ -97,10 +114,12 @@ def restart_as_admin():
         raise RuntimeError("Windows no pudo iniciar la aplicación como administrador.")
 
 class DeviceCard(QFrame):
-    def __init__(self,d):
+    def __init__(self,d,selectable=False,checked=False,on_toggle=None):
         super().__init__()
         self.setObjectName("card")
         lay=QVBoxLayout(self)
+        lay.setSpacing(7)
+
         top=QHBoxLayout()
         name=QLabel(d.name)
         name.setObjectName("deviceName")
@@ -111,7 +130,11 @@ class DeviceCard(QFrame):
         top.addWidget(pct)
         lay.addLayout(top)
 
-        meta=QLabel(f"{d.connection} · {d.status}")
+        meta_bits=[d.connection]
+        if d.device_type:
+            meta_bits.append(d.device_type)
+        meta_bits.append(d.status)
+        meta=QLabel(" · ".join(meta_bits))
         meta.setObjectName("muted")
         lay.addWidget(meta)
 
@@ -119,6 +142,8 @@ class DeviceCard(QFrame):
         bar.setTextVisible(False)
         bar.setRange(0,100)
         bar.setValue(d.percent or 0)
+        if d.status=="Cargando":
+            bar.setProperty("charging",True)
         lay.addWidget(bar)
 
         if d.detail:
@@ -126,6 +151,13 @@ class DeviceCard(QFrame):
             detail.setWordWrap(True)
             detail.setObjectName("detail")
             lay.addWidget(detail)
+
+        if selectable:
+            cb=QCheckBox("Mostrar en Mis dispositivos y en la bandeja del sistema")
+            cb.setChecked(checked)
+            if on_toggle:
+                cb.toggled.connect(lambda state,key=d.key:on_toggle(key,state))
+            lay.addWidget(cb)
 
 class SettingsDialog(QDialog):
     def __init__(self,window):
@@ -237,7 +269,7 @@ class SettingsDialog(QDialog):
         self.update_status.setText("Consultando GitHub…")
         self.update_watchdog.start(15000)
 
-        j=Job(lambda: check_update(timeout=8))
+        j=Job(lambda:check_update(timeout=8))
         self._update_job=j
         j.s.done.connect(lambda info,s=seq:self._check_done(s,info))
         j.s.error.connect(lambda err,s=seq:self._check_error(s,err))
@@ -281,7 +313,7 @@ class SettingsDialog(QDialog):
         )
         self.update_btn.setEnabled(False)
         self.update_btn.setText(f"Instalando v{info['version']}…")
-        j=Job(lambda: download_and_install(info["asset"]))
+        j=Job(lambda:download_and_install(info["asset"]))
         self._install_job=j
         j.s.done.connect(lambda _path:self._install_started(info["version"]))
         j.s.error.connect(self._install_error)
@@ -302,16 +334,18 @@ class Window(QMainWindow):
         self.manager=BatteryManager()
         self.pool=QThreadPool.globalInstance()
         self._refresh_job=None
+        self.devices={}
+        self.selected_keys,self._selection_loaded=_load_selection()
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
-        self.resize(720,640)
+        self.resize(850,720)
 
         root=QWidget()
         self.setCentralWidget(root)
         self.v=QVBoxLayout(root)
         self.v.setContentsMargins(28,24,28,24)
-        self.v.setSpacing(16)
+        self.v.setSpacing(14)
 
         h=QHBoxLayout()
         title=QLabel(APP_NAME)
@@ -329,12 +363,10 @@ class Window(QMainWindow):
 
         actions=QHBoxLayout()
         self.refresh_btn=QPushButton("Actualizar dispositivos")
-        self.refresh_btn.setToolTip("Vuelve a consultar el porcentaje y estado de los periféricos.")
+        self.refresh_btn.setToolTip("Vuelve a consultar porcentaje, conexión y estado de carga.")
         self.refresh_btn.clicked.connect(self.refresh)
         actions.addWidget(self.refresh_btn)
-
         self.settings_btn=QPushButton("Configuración")
-        self.settings_btn.setToolTip("Actualizaciones de la app, inicio con Windows, permisos y diagnóstico.")
         self.settings_btn.clicked.connect(self.open_settings)
         actions.addWidget(self.settings_btn)
         actions.addStretch()
@@ -344,9 +376,13 @@ class Window(QMainWindow):
         self.status.setObjectName("muted")
         self.v.addWidget(self.status)
 
-        self.cards=QVBoxLayout()
-        self.v.addLayout(self.cards)
-        self.v.addStretch()
+        self.tabs=QTabWidget()
+        self.v.addWidget(self.tabs,1)
+
+        self.selected_container,self.selected_layout=self._make_scroll_tab()
+        self.all_container,self.all_layout=self._make_scroll_tab()
+        self.tabs.addTab(self.selected_container,"Mis dispositivos")
+        self.tabs.addTab(self.all_container,"Todos los dispositivos")
 
         self.setStyleSheet("""QWidget{background:#0b1117;color:#edf4fa;font-family:Segoe UI;font-size:14px}
 QLabel#title{font-size:28px;font-weight:700}
@@ -360,35 +396,42 @@ QPushButton:hover{background:#243746}
 QPushButton:disabled{color:#667786;background:#101820}
 QProgressBar{height:10px;border:0;background:#25313b;border-radius:5px}
 QProgressBar::chunk{background:#30d158;border-radius:5px}
-QCheckBox{padding:4px}""")
+QCheckBox{padding:5px}
+QTabWidget::pane{border:1px solid #22303c;border-radius:10px;top:-1px}
+QTabBar::tab{background:#101820;color:#8fa3b5;padding:10px 18px;border:1px solid #22303c}
+QTabBar::tab:selected{background:#1b2935;color:#edf4fa}
+QScrollArea{border:0;background:transparent}""")
 
         self.settings_dialog=SettingsDialog(self)
-
         self.tray=QSystemTrayIcon(app_icon(),self)
-        menu=QMenu()
-        show=QAction("Abrir",self)
-        show.triggered.connect(self.show_normal)
-        menu.addAction(show)
-        refresh=QAction("Actualizar dispositivos",self)
-        refresh.triggered.connect(self.refresh)
-        menu.addAction(refresh)
-        settings=QAction("Configuración",self)
-        settings.triggered.connect(self.open_settings)
-        menu.addAction(settings)
-        menu.addSeparator()
-        quit_a=QAction("Salir",self)
-        quit_a.triggered.connect(QApplication.quit)
-        menu.addAction(quit_a)
-        self.tray.setContextMenu(menu)
         self.tray.activated.connect(
             lambda r:self.show_normal() if r==QSystemTrayIcon.Trigger else None
         )
         self.tray.show()
+        self.rebuild_tray_menu()
 
         self.timer=QTimer(self)
         self.timer.timeout.connect(self.refresh)
         self.timer.start(30000)
         self.refresh()
+
+    def _make_scroll_tab(self):
+        scroll=QScrollArea()
+        scroll.setWidgetResizable(True)
+        body=QWidget()
+        layout=QVBoxLayout(body)
+        layout.setContentsMargins(12,12,12,12)
+        layout.setSpacing(12)
+        layout.setAlignment(Qt.AlignTop)
+        scroll.setWidget(body)
+        return scroll,layout
+
+    def _clear_layout(self,layout):
+        while layout.count():
+            item=layout.takeAt(0)
+            w=item.widget()
+            if w:
+                w.deleteLater()
 
     def open_settings(self):
         self.settings_dialog.show()
@@ -410,13 +453,6 @@ QCheckBox{padding:4px}""")
             1800,
         )
 
-    def clear_cards(self):
-        while self.cards.count():
-            item=self.cards.takeAt(0)
-            w=item.widget()
-            if w:
-                w.deleteLater()
-
     def refresh(self):
         if not self.refresh_btn.isEnabled():
             return
@@ -436,14 +472,108 @@ QCheckBox{padding:4px}""")
         self.refresh_btn.setText("Actualizar dispositivos")
 
     def render(self,devices):
-        self.clear_cards()
-        for d in sorted(devices,key=lambda x:(x.percent is None,x.name.lower())):
-            self.cards.addWidget(DeviceCard(d))
+        self.devices={d.key:d for d in devices}
+        if not self._selection_loaded and devices:
+            self.selected_keys={d.key for d in devices}
+            _save_selection(self.selected_keys)
+            self._selection_loaded=True
+        self._render_all()
+        self._render_selected()
+        self.rebuild_tray_menu()
+        bt_count=sum(1 for d in devices if d.connection=="Bluetooth")
         self.status.setText(
-            f"{len(devices)} dispositivo(s) detectado(s)"
+            f"{len(devices)} dispositivo(s) detectado(s) · {bt_count} Bluetooth"
             if devices else
             "No encontré periféricos compatibles o visibles."
         )
+
+    def _render_selected(self):
+        self._clear_layout(self.selected_layout)
+        chosen=[
+            d for d in self.devices.values()
+            if d.key in self.selected_keys
+        ]
+        chosen.sort(key=lambda d:(d.percent is None,d.name.lower()))
+        if not chosen:
+            hint=QLabel(
+                "No seleccionaste ningún dispositivo. Abrí “Todos los dispositivos” y marcá los que querés ver acá y en la bandeja."
+            )
+            hint.setWordWrap(True)
+            hint.setObjectName("muted")
+            self.selected_layout.addWidget(hint)
+            return
+        for d in chosen:
+            self.selected_layout.addWidget(DeviceCard(d))
+
+    def _render_all(self):
+        self._clear_layout(self.all_layout)
+        devices=sorted(self.devices.values(),key=lambda d:(d.connection!="Bluetooth",d.name.lower()))
+        if not devices:
+            hint=QLabel("No hay dispositivos detectados.")
+            hint.setObjectName("muted")
+            self.all_layout.addWidget(hint)
+            return
+        for d in devices:
+            self.all_layout.addWidget(
+                DeviceCard(
+                    d,
+                    selectable=True,
+                    checked=d.key in self.selected_keys,
+                    on_toggle=self.set_device_selected,
+                )
+            )
+
+    def set_device_selected(self,key,enabled):
+        if enabled:
+            self.selected_keys.add(key)
+        else:
+            self.selected_keys.discard(key)
+        _save_selection(self.selected_keys)
+        self._selection_loaded=True
+        self._render_selected()
+        self.rebuild_tray_menu()
+
+    def rebuild_tray_menu(self):
+        menu=QMenu()
+        open_action=QAction("Abrir Porcentaje de batería",self)
+        open_action.triggered.connect(self.show_normal)
+        menu.addAction(open_action)
+
+        selected=[
+            d for d in self.devices.values()
+            if d.key in self.selected_keys
+        ]
+        selected.sort(key=lambda d:d.name.lower())
+        if selected:
+            menu.addSeparator()
+            header=QAction("Mis dispositivos",self)
+            header.setEnabled(False)
+            menu.addAction(header)
+            tooltip=[]
+            for d in selected:
+                level="—" if d.percent is None else f"{d.percent}%"
+                charge=f" · {d.status}" if d.status else ""
+                action=QAction(f"{d.name}  ·  {level}{charge}",self)
+                action.triggered.connect(self.show_normal)
+                menu.addAction(action)
+                tooltip.append(f"{d.name}: {level}")
+            self.tray.setToolTip(" | ".join(tooltip)[:125])
+        else:
+            self.tray.setToolTip(APP_NAME)
+
+        menu.addSeparator()
+        refresh=QAction("Actualizar dispositivos",self)
+        refresh.triggered.connect(self.refresh)
+        menu.addAction(refresh)
+        settings=QAction("Configuración",self)
+        settings.triggered.connect(self.open_settings)
+        menu.addAction(settings)
+        menu.addSeparator()
+        quit_a=QAction("Salir",self)
+        quit_a.triggered.connect(QApplication.quit)
+        menu.addAction(quit_a)
+        self.tray.setContextMenu(menu)
+        self._tray_menu=menu
 
     def export_diag(self):
         path,_=QFileDialog.getSaveFileName(
